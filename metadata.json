@@ -1,0 +1,8 @@
+{
+  "name": "Remix Sistem Survei Kepuasan Pelayanan PTUN Pangkalpinang",
+  "description": "Aplikasi survei kepuasan masyarakat terhadap pelayanan petugas PTSP Pengadilan Tata Usaha Negara Pangkalpinang dengan mode kiosk dan dashboard analitik.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
