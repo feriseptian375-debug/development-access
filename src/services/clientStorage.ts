@@ -205,26 +205,68 @@ export const clientStorage = {
     safeJsonSet(STORAGE_KEYS.SURVEYS, surveys);
   },
 
+  addSurvey(survey: Survey): void {
+    if (!survey || !survey.id) return;
+    const surveys = this.getSurveys();
+    const existingIdx = surveys.findIndex((s) => s.id === survey.id);
+    if (existingIdx === -1) {
+      surveys.unshift(survey);
+    } else {
+      surveys[existingIdx] = { ...surveys[existingIdx], ...survey };
+    }
+    surveys.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    this.saveSurveys(surveys);
+  },
+
+  mergeSurveys(incoming: Survey[]): Survey[] {
+    if (!Array.isArray(incoming) || incoming.length === 0) {
+      return this.getSurveys();
+    }
+    const localSurveys = this.getSurveys();
+    const map = new Map<string, Survey>();
+    for (const s of localSurveys) {
+      if (s && s.id) map.set(s.id, s);
+    }
+    for (const s of incoming) {
+      if (s && s.id) {
+        const existing = map.get(s.id);
+        map.set(s.id, existing ? { ...existing, ...s } : s);
+      }
+    }
+    const merged = Array.from(map.values()).sort(
+      (a, b) => (b.timestamp || 0) - (a.timestamp || 0)
+    );
+    this.saveSurveys(merged);
+    return merged;
+  },
+
   submitSurvey(params: {
     service_id: string;
     sub_service_name?: string;
     rating: RatingValue;
     feedback_choice: 'ada' | 'tidak_ada';
     feedback?: string;
+    client_date?: string;
+    client_time?: string;
+    client_timestamp?: number;
   }): Survey {
     const services = this.getServices(false);
     const service = services.find((s) => s.id === params.service_id);
     const serviceName = service ? service.name : 'Pelayanan PTSP';
 
-    const now = new Date();
-    const dateStr = now.toISOString().split('T')[0];
-    const timeStr = now.toTimeString().split(' ')[0];
+    const now = params.client_timestamp ? new Date(params.client_timestamp) : new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    const defaultDateStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    const defaultTimeStr = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+    const dateStr = params.client_date || defaultDateStr;
+    const timeStr = params.client_time || defaultTimeStr;
 
     const newSurvey: Survey = {
-      id: `surv-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      id: `srv-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       date: dateStr,
       time: timeStr,
-      timestamp: now.getTime(),
+      timestamp: params.client_timestamp || now.getTime(),
       service_id: params.service_id,
       service_name: serviceName,
       sub_service_name: params.sub_service_name,
@@ -327,24 +369,35 @@ export const clientStorage = {
       surveys = surveys.filter((s) => s.service_id === serviceId);
     }
 
-    const todayStr = new Date().toISOString().split('T')[0];
     const now = new Date();
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    // Compute today in local/WIB timezone
+    const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 
     if (period === 'today') {
       surveys = surveys.filter((s) => s.date === todayStr);
-    } else if (period === 'this_week') {
-      const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-      surveys = surveys.filter((s) => s.date >= oneWeekAgo);
+    } else if (period === '7days' || period === 'this_week') {
+      const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      const sevenDaysAgoStr = `${sevenDaysAgo.getFullYear()}-${pad(sevenDaysAgo.getMonth() + 1)}-${pad(sevenDaysAgo.getDate())}`;
+      surveys = surveys.filter((s) => s.date >= sevenDaysAgoStr);
     } else if (period === 'this_month') {
       const monthPrefix = todayStr.substring(0, 7);
       surveys = surveys.filter((s) => s.date.startsWith(monthPrefix));
+    } else if (period === '3months') {
+      const threeMonthsAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      const threeMonthsAgoStr = `${threeMonthsAgo.getFullYear()}-${pad(threeMonthsAgo.getMonth() + 1)}-${pad(threeMonthsAgo.getDate())}`;
+      surveys = surveys.filter((s) => s.date >= threeMonthsAgoStr);
     } else if (period === 'this_year') {
       const yearPrefix = todayStr.substring(0, 4);
       surveys = surveys.filter((s) => s.date.startsWith(yearPrefix));
     }
 
     const total = surveys.length;
-    const todayCount = this.getSurveys().filter((s) => s.date === todayStr).length;
+    let allSurveys = this.getSurveys().filter((s) => s.status === 'valid');
+    if (serviceId !== 'all') {
+      allSurveys = allSurveys.filter((s) => s.service_id === serviceId);
+    }
+    const todayCount = allSurveys.filter((s) => s.date === todayStr).length;
 
     const distribution = {
       sangat_puas: 0,

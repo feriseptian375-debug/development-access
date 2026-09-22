@@ -15,6 +15,7 @@ export interface Env {
   SURVEY_KV?: any;
   ADMIN_USERNAME?: string;
   ADMIN_PASSWORD?: string;
+  JWT_SECRET?: string;
 }
 
 export interface UserRecord {
@@ -123,16 +124,64 @@ function getInitialData(env?: Env): DatabaseSchema {
   };
 }
 
-async function loadData(env: Env): Promise<DatabaseSchema> {
-  if (inMemoryData) return inMemoryData;
+const DEFAULT_JWT_SECRET = 'ptun-pangkalpinang-session-secure-key-2026';
 
-  // 1. Try reading from Cloudflare KV
+function base64UrlEncode(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64UrlDecode(str: string): string {
+  let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (base64.length % 4) {
+    base64 += '=';
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function signData(data: string, secret: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    enc.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, enc.encode(data));
+  const bytes = new Uint8Array(signature);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function loadData(env: Env, requestUrl?: string): Promise<DatabaseSchema> {
+  // 1. Try reading from Cloudflare KV if bound
   if (env.SURVEY_KV) {
     try {
       const raw = await env.SURVEY_KV.get('ptun_database_json');
       if (raw) {
         const parsed = JSON.parse(raw);
         if (parsed.users && parsed.services && parsed.settings) {
+          if (inMemoryData && inMemoryData.surveys && inMemoryData.surveys.length > 0) {
+            const kvIds = new Set((parsed.surveys || []).map((s: any) => s.id));
+            for (const s of inMemoryData.surveys) {
+              if (!kvIds.has(s.id)) {
+                parsed.surveys.push(s);
+              }
+            }
+          }
           inMemoryData = parsed;
           return parsed;
         }
@@ -142,29 +191,34 @@ async function loadData(env: Env): Promise<DatabaseSchema> {
     }
   }
 
-  // 2. Try reading from Cloudflare global edge cache
-  try {
-    const cache = (caches as any).default;
-    if (cache) {
-      const cacheUrl = 'https://ptun-database-cache.internal/db.json';
-      const cached = await cache.match(cacheUrl);
-      if (cached) {
-        const parsed = await cached.json();
-        if (parsed.users && parsed.services && parsed.settings) {
-          inMemoryData = parsed;
-          return parsed;
+  // 2. Return in-memory data if already loaded
+  if (inMemoryData) return inMemoryData;
+
+  // 3. Try reading from Cloudflare Cache API on current zone URL
+  if (requestUrl) {
+    try {
+      const cache = (caches as any).default;
+      if (cache) {
+        const cacheUrl = new URL('/__ptun_internal_db_store__', requestUrl).toString();
+        const cached = await cache.match(cacheUrl);
+        if (cached) {
+          const parsed = await cached.json();
+          if (parsed.users && parsed.services && parsed.settings) {
+            inMemoryData = parsed;
+            return parsed;
+          }
         }
       }
+    } catch (err) {
+      // Non-fatal
     }
-  } catch (err) {
-    // Non-fatal
   }
 
   inMemoryData = getInitialData(env);
   return inMemoryData;
 }
 
-async function saveData(data: DatabaseSchema, env: Env): Promise<void> {
+async function saveData(data: DatabaseSchema, env: Env, requestUrl?: string): Promise<void> {
   inMemoryData = data;
   if (env.SURVEY_KV) {
     try {
@@ -174,21 +228,23 @@ async function saveData(data: DatabaseSchema, env: Env): Promise<void> {
     }
   }
 
-  // Also persist to global edge cache if Cache API is available
-  try {
-    const cache = (caches as any).default;
-    if (cache) {
-      const cacheUrl = 'https://ptun-database-cache.internal/db.json';
-      const cacheRes = new Response(JSON.stringify(data), {
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'public, max-age=31536000',
-        },
-      });
-      await cache.put(cacheUrl, cacheRes);
+  // Also persist to global edge cache using zone URL
+  if (requestUrl) {
+    try {
+      const cache = (caches as any).default;
+      if (cache) {
+        const cacheUrl = new URL('/__ptun_internal_db_store__', requestUrl).toString();
+        const cacheRes = new Response(JSON.stringify(data), {
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'public, max-age=31536000',
+          },
+        });
+        await cache.put(cacheUrl, cacheRes);
+      }
+    } catch (err) {
+      // Non-fatal
     }
-  } catch (err) {
-    // Non-fatal
   }
 }
 
@@ -201,6 +257,19 @@ interface SessionInfo {
 }
 const sessions = new Map<string, SessionInfo>();
 const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function generateAuthToken(user: { id: string; username: string; role: string }, env?: Env): Promise<string> {
+  const secret = env?.JWT_SECRET || DEFAULT_JWT_SECRET;
+  const payload = {
+    userId: user.id,
+    username: user.username,
+    role: user.role,
+    exp: Date.now() + SESSION_TTL_MS,
+  };
+  const payloadStr = base64UrlEncode(JSON.stringify(payload));
+  const signature = await signData(payloadStr, secret);
+  return `${payloadStr}.${signature}`;
+}
 
 function jsonResponse(data: any, status = 200, customHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
@@ -215,19 +284,66 @@ function jsonResponse(data: any, status = 200, customHeaders: Record<string, str
   });
 }
 
-function verifyAuth(request: Request): SessionInfo | null {
+async function verifyAuth(request: Request, env?: Env): Promise<SessionInfo | null> {
   const authHeader = request.headers.get('authorization') || request.headers.get('Authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return null;
   }
   const token = authHeader.substring(7).trim();
+  if (!token) return null;
+
+  // 1. Check in-memory session (fast path)
   const session = sessions.get(token);
-  if (!session || Date.now() > session.expiresAt) {
-    if (session) sessions.delete(token);
-    return null;
+  if (session && Date.now() <= session.expiresAt) {
+    session.expiresAt = Date.now() + SESSION_TTL_MS;
+    return session;
   }
-  session.expiresAt = Date.now() + SESSION_TTL_MS;
-  return session;
+
+  // 2. Stateless HMAC-SHA256 signature verification (cross-isolate reliable auth)
+  if (token.includes('.')) {
+    const parts = token.split('.');
+    if (parts.length === 2) {
+      const [payloadStr, signature] = parts;
+      const secret = env?.JWT_SECRET || DEFAULT_JWT_SECRET;
+      try {
+        const expectedSignature = await signData(payloadStr, secret);
+        if (expectedSignature === signature) {
+          const payload = JSON.parse(base64UrlDecode(payloadStr));
+          if (payload.userId && payload.exp && Date.now() <= payload.exp) {
+            const verifiedSession: SessionInfo = {
+              userId: payload.userId,
+              username: payload.username,
+              role: payload.role,
+              expiresAt: payload.exp,
+            };
+            sessions.set(token, verifiedSession);
+            return verifiedSession;
+          }
+        }
+      } catch (err) {
+        console.warn('Stateless token verification error:', err);
+      }
+    }
+  }
+
+  return null;
+}
+
+function syncSurveysToDb(dbData: DatabaseSchema, incoming: Survey[]): number {
+  if (!Array.isArray(incoming) || incoming.length === 0) return 0;
+  const existingIds = new Set(dbData.surveys.map((s) => s.id));
+  let added = 0;
+  for (const item of incoming) {
+    if (item && item.id && !existingIds.has(item.id)) {
+      dbData.surveys.push(item);
+      existingIds.add(item.id);
+      added++;
+    }
+  }
+  if (added > 0) {
+    dbData.surveys.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  }
+  return added;
 }
 
 export default {
