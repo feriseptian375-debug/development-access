@@ -52,6 +52,7 @@ export interface AppSettings {
   primary_color: string;
   footer_text: string;
   service_officers?: ServiceOfficer[];
+  updated_at?: string;
 }
 
 export interface AdminUser {

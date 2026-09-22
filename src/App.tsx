@@ -6,7 +6,7 @@ import {
   logoutAdmin,
   getStoredToken,
 } from './services/api';
-import { DEFAULT_SERVICES } from './services/clientStorage';
+import { clientStorage, DEFAULT_SERVICES } from './services/clientStorage';
 import { INITIAL_OFFICERS } from './utils/officers';
 import { PublicSurveyView } from './components/PublicSurveyView';
 import { AdminLoginModal } from './components/AdminLoginModal';
@@ -17,23 +17,9 @@ import { AdminReportView } from './components/AdminReportView';
 import { AdminServicesView } from './components/AdminServicesView';
 import { AdminSettingsView } from './components/AdminSettingsView';
 
-const DEFAULT_SETTINGS: AppSettings = {
-  agency_name: 'PTUN Pangkalpinang',
-  app_name: 'Sistem Survei Kepuasan Pelayanan',
-  logo_url:
-    'https://media.canva.com/v2/download/name:LOGO+PTUN+PKP+TERBARU.png/uri:ifs%3A%2F%2FM%2F1bf733e1abd446f9aed2b2ccfdec0e1e?csig=AAAAAAAAAAAAAAAAAAAAAHYjLjd8PZ86bTrKEkscibX4WCN_E_TmfdqZ2phiQ8iO&exp=1790049450&signer=media-rpc&token=AAIAAU0AIDFiZjczM2UxYWJkNDQ2ZjlhZWQyYjJjY2ZkZWMwZTFlAAAAAAGgx-fDzHYn7PAwbx-Ilh5iISgbZQRGeWSkvs2NRmgt2FeKXhlr',
-  survey_title: 'SURVEI KEPUASAN PELAYANAN PETUGAS PTSP\nPTUN PANGKALPINANG',
-  survey_subtitle: 'Berikan penilaian Anda terhadap pelayanan yang telah diterima.',
-  success_message: 'Masukan Anda sangat membantu kami dalam meningkatkan kualitas pelayanan.',
-  redirect_delay_seconds: 5,
-  primary_color: '#1e3a8a',
-  footer_text: 'Copyright © 2026 PTUN Pangkalpinang. All Rights Reserved.',
-  service_officers: INITIAL_OFFICERS,
-};
-
 export default function App() {
-  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
-  const [services, setServices] = useState<Service[]>(DEFAULT_SERVICES);
+  const [settings, setSettings] = useState<AppSettings>(() => clientStorage.getSettings());
+  const [services, setServices] = useState<Service[]>(() => clientStorage.getServices(true));
   const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
 
   // App View State: 'survey' | 'admin'

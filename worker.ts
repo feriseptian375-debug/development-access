@@ -126,6 +126,7 @@ function getInitialData(env?: Env): DatabaseSchema {
 async function loadData(env: Env): Promise<DatabaseSchema> {
   if (inMemoryData) return inMemoryData;
 
+  // 1. Try reading from Cloudflare KV
   if (env.SURVEY_KV) {
     try {
       const raw = await env.SURVEY_KV.get('ptun_database_json');
@@ -141,6 +142,24 @@ async function loadData(env: Env): Promise<DatabaseSchema> {
     }
   }
 
+  // 2. Try reading from Cloudflare global edge cache
+  try {
+    const cache = (caches as any).default;
+    if (cache) {
+      const cacheUrl = 'https://ptun-database-cache.internal/db.json';
+      const cached = await cache.match(cacheUrl);
+      if (cached) {
+        const parsed = await cached.json();
+        if (parsed.users && parsed.services && parsed.settings) {
+          inMemoryData = parsed;
+          return parsed;
+        }
+      }
+    }
+  } catch (err) {
+    // Non-fatal
+  }
+
   inMemoryData = getInitialData(env);
   return inMemoryData;
 }
@@ -153,6 +172,23 @@ async function saveData(data: DatabaseSchema, env: Env): Promise<void> {
     } catch (e) {
       console.error('Failed to write to SURVEY_KV:', e);
     }
+  }
+
+  // Also persist to global edge cache if Cache API is available
+  try {
+    const cache = (caches as any).default;
+    if (cache) {
+      const cacheUrl = 'https://ptun-database-cache.internal/db.json';
+      const cacheRes = new Response(JSON.stringify(data), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'public, max-age=31536000',
+        },
+      });
+      await cache.put(cacheUrl, cacheRes);
+    }
+  } catch (err) {
+    // Non-fatal
   }
 }
 
@@ -746,10 +782,19 @@ export default {
     }
 
     if (path === '/api/admin/settings' && method === 'PUT') {
-      const partialSettings: any = await request.json();
-      dbData.settings = { ...dbData.settings, ...partialSettings };
-      await saveData(dbData, env);
-      return jsonResponse(dbData.settings);
+      try {
+        const partialSettings: any = await request.json();
+        const now = new Date().toISOString();
+        dbData.settings = {
+          ...dbData.settings,
+          ...partialSettings,
+          updated_at: partialSettings.updated_at || now,
+        };
+        await saveData(dbData, env);
+        return jsonResponse(dbData.settings);
+      } catch (err: any) {
+        return jsonResponse({ error: 'Gagal memperbarui pengaturan aplikasi: ' + (err.message || '') }, 500);
+      }
     }
 
     // 17. Admin: Report Data

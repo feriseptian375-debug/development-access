@@ -93,8 +93,24 @@ function safeJsonParse<T>(key: string, fallback: T): T {
 function safeJsonSet<T>(key: string, val: T): void {
   try {
     localStorage.setItem(key, JSON.stringify(val));
-  } catch (err) {
+  } catch (err: any) {
     console.error('LocalStorage write error:', err);
+    // If quota exceeded, clean up old demo surveys to ensure critical settings can be stored
+    if (err?.name === 'QuotaExceededError' || err?.code === 22) {
+      try {
+        const rawSurveys = localStorage.getItem(STORAGE_KEYS.SURVEYS);
+        if (rawSurveys) {
+          const list = JSON.parse(rawSurveys);
+          if (Array.isArray(list) && list.length > 30) {
+            // Keep recent surveys only
+            localStorage.setItem(STORAGE_KEYS.SURVEYS, JSON.stringify(list.slice(0, 30)));
+            localStorage.setItem(key, JSON.stringify(val));
+          }
+        }
+      } catch (pruneErr) {
+        console.warn('Could not prune localStorage surveys:', pruneErr);
+      }
+    }
   }
 }
 
@@ -108,9 +124,19 @@ export const clientStorage = {
     return stored;
   },
 
+  hasCustomSettings(): boolean {
+    const stored = safeJsonParse<AppSettings | null>(STORAGE_KEYS.SETTINGS, null);
+    if (!stored) return false;
+    return Boolean(stored.updated_at);
+  },
+
   updateSettings(partial: Partial<AppSettings>): AppSettings {
     const current = this.getSettings();
-    const updated = { ...current, ...partial };
+    const updated: AppSettings = {
+      ...current,
+      ...partial,
+      updated_at: partial.updated_at || new Date().toISOString(),
+    };
     safeJsonSet(STORAGE_KEYS.SETTINGS, updated);
     return updated;
   },

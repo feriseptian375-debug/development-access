@@ -32,6 +32,7 @@ import {
   DEFAULT_OFFICER_PHOTOS,
   DEFAULT_OFFICIAL_LOGO,
 } from '../utils/officers';
+import { compressOfficerPhoto, compressLogoImage } from '../utils/imageOptimizer';
 import { CourtLogo } from './CourtLogo';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -39,69 +40,6 @@ interface AdminSettingsViewProps {
   settings: AppSettings;
   onSettingsUpdated: (updated: AppSettings) => void;
 }
-
-// Client-side image processing helper for logos: preserves transparency and optimizes dimensions
-const processLogoImageFile = (file: File): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    if (file.size > 15 * 1024 * 1024) {
-      reject(new Error('Ukuran file maksimal 15 MB.'));
-      return;
-    }
-
-    // Keep SVG vector format untouched
-    if (file.type === 'image/svg+xml') {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result as string);
-      reader.onerror = () => reject(new Error('Gagal membaca file SVG logo.'));
-      reader.readAsDataURL(file);
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new window.Image();
-      img.onload = () => {
-        const MAX_DIM = 1024; // High-resolution crisp rendering
-        let width = img.width;
-        let height = img.height;
-
-        if (width > MAX_DIM || height > MAX_DIM) {
-          if (width > height) {
-            height = Math.round((height * MAX_DIM) / width);
-            width = MAX_DIM;
-          } else {
-            width = Math.round((width * MAX_DIM) / height);
-            height = MAX_DIM;
-          }
-        }
-
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          resolve(reader.result as string);
-          return;
-        }
-
-        ctx.clearRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
-
-        const isJpeg = file.type === 'image/jpeg' || file.type === 'image/jpg';
-        const outputType = isJpeg ? 'image/jpeg' : 'image/png';
-        const quality = isJpeg ? 0.92 : undefined;
-        const dataUrl = canvas.toDataURL(outputType, quality);
-        resolve(dataUrl);
-      };
-      img.onerror = () => {
-        resolve(reader.result as string);
-      };
-      img.src = e.target?.result as string;
-    };
-    reader.onerror = () => reject(new Error('Gagal membaca file gambar logo.'));
-    reader.readAsDataURL(file);
-  });
-};
 
 export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   settings,
@@ -154,6 +92,7 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   // Officers Management State
   const [officers, setOfficers] = useState<ServiceOfficer[]>([]);
   const [isSavingOfficers, setIsSavingOfficers] = useState(false);
+  const [uploadingOfficerId, setUploadingOfficerId] = useState<string | null>(null);
   const [officerSuccess, setOfficerSuccess] = useState<string | null>(null);
   const [officerError, setOfficerError] = useState<string | null>(null);
 
@@ -172,16 +111,23 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
     );
   };
 
-  const handleOfficerPhotoUpload = (id: string, file: File) => {
-    if (file.size > 8 * 1024 * 1024) {
-      alert('Ukuran file foto maksimal 8 MB.');
+  const handleOfficerPhotoUpload = async (id: string, file: File) => {
+    if (file.size > 15 * 1024 * 1024) {
+      alert('Ukuran file foto maksimal 15 MB.');
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      handleUpdateOfficer(id, 'photo_url', reader.result as string);
-    };
-    reader.readAsDataURL(file);
+    setUploadingOfficerId(id);
+    setOfficerError(null);
+    try {
+      const optimizedUrl = await compressOfficerPhoto(file);
+      handleUpdateOfficer(id, 'photo_url', optimizedUrl);
+      setOfficerSuccess('Foto petugas berhasil dioptimalkan dan diunggah. Klik "Simpan Foto & Data Petugas" untuk menyimpan secara permanen.');
+      setTimeout(() => setOfficerSuccess(null), 5000);
+    } catch (err: any) {
+      setOfficerError(err.message || 'Gagal memproses foto petugas.');
+    } finally {
+      setUploadingOfficerId(null);
+    }
   };
 
   const handleSaveOfficers = async (e?: React.FormEvent) => {
@@ -251,9 +197,9 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
     }
 
     try {
-      const dataUrl = await processLogoImageFile(file);
+      const dataUrl = await compressLogoImage(file);
       setLogoUrl(dataUrl);
-      setLogoSuccessMessage(`File logo "${file.name}" berhasil diimpor! Klik tombol "Simpan Logo" untuk menerapkan ke seluruh sistem.`);
+      setLogoSuccessMessage(`File logo "${file.name}" berhasil dioptimalkan dan diimpor! Klik tombol "Simpan Logo" untuk menerapkan ke seluruh sistem.`);
       setTimeout(() => setLogoSuccessMessage(null), 5000);
     } catch (err: any) {
       setLogoErrorMessage(err.message || 'Gagal memproses file gambar logo.');
@@ -281,16 +227,32 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
   };
 
   // Reset to default official logo
-  const handleResetDefaultLogo = () => {
+  const handleResetDefaultLogo = async () => {
     setLogoUrl(DEFAULT_OFFICIAL_LOGO);
-    setLogoSuccessMessage('Logo dikembalikan ke logo resmi standar PTUN Pangkalpinang.');
+    try {
+      const updated = await updateAdminSettings({
+        logo_url: DEFAULT_OFFICIAL_LOGO,
+      });
+      onSettingsUpdated(updated);
+      setLogoSuccessMessage('Logo resmi standar PTUN Pangkalpinang berhasil disimpan dan diterapkan.');
+    } catch {
+      setLogoSuccessMessage('Logo dikembalikan ke logo resmi standar PTUN Pangkalpinang.');
+    }
     setTimeout(() => setLogoSuccessMessage(null), 4000);
   };
 
   // Switch to SVG vector seal
-  const handleUseVectorSeal = () => {
+  const handleUseVectorSeal = async () => {
     setLogoUrl('');
-    setLogoSuccessMessage('Logo diatur menggunakan lambang segel vektor resmi Pengadilan.');
+    try {
+      const updated = await updateAdminSettings({
+        logo_url: '',
+      });
+      onSettingsUpdated(updated);
+      setLogoSuccessMessage('Lambang segel vektor resmi berhasil diterapkan dan disimpan.');
+    } catch {
+      setLogoSuccessMessage('Logo diatur menggunakan lambang segel vektor resmi Pengadilan.');
+    }
     setTimeout(() => setLogoSuccessMessage(null), 4000);
   };
 
@@ -939,6 +901,12 @@ export const AdminSettingsView: React.FC<AdminSettingsViewProps> = ({
                         (e.target as HTMLImageElement).src = DEFAULT_OFFICER_PHOTOS[0];
                       }}
                     />
+                    {uploadingOfficerId === officer.id && (
+                      <div className="absolute inset-0 bg-blue-950/75 text-white rounded-2xl flex flex-col items-center justify-center text-[10px] font-bold p-1 z-10">
+                        <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mb-1" />
+                        <span>Memproses...</span>
+                      </div>
+                    )}
                     <label
                       title="Klik untuk upload foto baru"
                       className="absolute inset-0 bg-slate-900/60 text-white rounded-2xl opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center cursor-pointer transition-opacity text-[10px] font-bold text-center p-1"

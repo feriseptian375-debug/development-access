@@ -53,15 +53,65 @@ async function isServerRunning(): Promise<boolean> {
   return false;
 }
 
+// Helper to rehydrate server with custom client settings in background
+async function syncClientSettingsToServer(settings: AppSettings): Promise<void> {
+  try {
+    const token = getStoredToken();
+    if (!token) return;
+    await fetch('/api/admin/settings', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(settings),
+    });
+  } catch {
+    // Background sync failure is non-blocking
+  }
+}
+
 // --- Public Endpoints ---
 export async function getPublicConfig(): Promise<{ settings: AppSettings; services: Service[] }> {
+  const localSettings = clientStorage.getSettings();
+  const localServices = clientStorage.getServices(true);
+
   try {
     const hasServer = await isServerRunning();
     if (hasServer) {
       const res = await fetch('/api/public/config');
       const ct = res.headers.get('content-type') || '';
       if (res.ok && ct.includes('application/json')) {
-        return await res.json();
+        const data = await res.json();
+        const serverSettings: AppSettings = data.settings;
+        const serverServices: Service[] = data.services || [];
+
+        // Reconciliation: Check if client has newer custom settings
+        const clientTimestamp = localSettings.updated_at ? new Date(localSettings.updated_at).getTime() : 0;
+        const serverTimestamp = serverSettings?.updated_at ? new Date(serverSettings.updated_at).getTime() : 0;
+
+        // If local settings are newer than server settings (e.g. server worker isolate reset),
+        // keep localSettings and sync them back to server in background
+        if (clientTimestamp > serverTimestamp) {
+          syncClientSettingsToServer(localSettings);
+          return {
+            settings: localSettings,
+            services: serverServices.length > 0 ? serverServices : localServices,
+          };
+        }
+
+        // Otherwise server settings are equal or newer, update local storage cache
+        if (serverSettings) {
+          clientStorage.updateSettings(serverSettings);
+        }
+        if (serverServices.length > 0) {
+          clientStorage.saveServices(serverServices);
+        }
+
+        return {
+          settings: serverSettings || localSettings,
+          services: serverServices.length > 0 ? serverServices : localServices,
+        };
       }
     }
   } catch (err) {
@@ -70,8 +120,8 @@ export async function getPublicConfig(): Promise<{ settings: AppSettings; servic
 
   // Fallback to client storage
   return {
-    settings: clientStorage.getSettings(),
-    services: clientStorage.getServices(true),
+    settings: localSettings,
+    services: localServices,
   };
 }
 
@@ -429,6 +479,8 @@ export async function deleteAdminService(id: string): Promise<void> {
 }
 
 export async function getAdminSettings(): Promise<AppSettings> {
+  const localSettings = clientStorage.getSettings();
+
   try {
     const hasServer = await isServerRunning();
     if (hasServer) {
@@ -437,35 +489,57 @@ export async function getAdminSettings(): Promise<AppSettings> {
       });
       const ct = res.headers.get('content-type') || '';
       if (res.ok && ct.includes('application/json')) {
-        return await res.json();
+        const serverSettings: AppSettings = await res.json();
+        const clientTimestamp = localSettings.updated_at ? new Date(localSettings.updated_at).getTime() : 0;
+        const serverTimestamp = serverSettings?.updated_at ? new Date(serverSettings.updated_at).getTime() : 0;
+
+        if (clientTimestamp > serverTimestamp) {
+          syncClientSettingsToServer(localSettings);
+          return localSettings;
+        }
+
+        clientStorage.updateSettings(serverSettings);
+        return serverSettings;
       }
     }
   } catch {
     // Fallback
   }
 
-  return clientStorage.getSettings();
+  return localSettings;
 }
 
 export async function updateAdminSettings(settings: Partial<AppSettings>): Promise<AppSettings> {
+  const now = new Date().toISOString();
+  const settingsWithTimestamp: Partial<AppSettings> = {
+    ...settings,
+    updated_at: settings.updated_at || now,
+  };
+
+  // 1. Always update local clientStorage immediately
+  const localSaved = clientStorage.updateSettings(settingsWithTimestamp);
+
+  // 2. Persist to server backend if available
   try {
     const hasServer = await isServerRunning();
     if (hasServer) {
       const res = await fetch('/api/admin/settings', {
         method: 'PUT',
         headers: getAuthHeaders(),
-        body: JSON.stringify(settings),
+        body: JSON.stringify(settingsWithTimestamp),
       });
       const ct = res.headers.get('content-type') || '';
       if (res.ok && ct.includes('application/json')) {
-        return await res.json();
+        const serverUpdated = await res.json();
+        // Sync back to client storage to maintain exact consistency
+        return clientStorage.updateSettings(serverUpdated);
       }
     }
-  } catch {
-    // Fallback
+  } catch (err) {
+    console.warn('Backend update failed, saved to clientStorage:', err);
   }
 
-  return clientStorage.updateSettings(settings);
+  return localSaved;
 }
 
 export async function getReportData(

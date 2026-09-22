@@ -270,6 +270,7 @@ export class Database {
     this.data.settings = {
       ...this.data.settings,
       ...updates,
+      updated_at: updates.updated_at || new Date().toISOString(),
     };
     this.persist();
     return this.getSettings();
